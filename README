@@ -90,4 +90,6 @@ Project Structure
   │   ├── keygen.hpp              # deterministic key generation
   │   ├── verify.hpp              # checksum + element-wise verification
   │   └── hpc_helpers.hpp         # timing macros + benchmarking stats
-  └── report/                     # PDF report goes here
+  └── report/
+      ├── report.tex              # LaTeX source
+      └── report.pdf              # compiled PDF report
