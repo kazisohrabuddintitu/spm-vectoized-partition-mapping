@@ -1,0 +1,93 @@
+SPM Modular Project - Module 1: Partition Mapping Kernel
+========================================================
+Author: Kazi Sohrab Uddin Titu
+
+Description
+-----------
+Vectorized key-to-partition mapping using multiply-shift hash.
+Given N uint64_t keys and P partitions (power of two), computes a
+partition ID for each key using a multiply-shift hash function.
+
+Two hash strategies (compile-time selectable):
+  - 32-bit hash (default): extracts upper 32 bits of each key, multiplies
+    by Knuth's 32-bit constant (0x9E3779B9), shifts right by (32 - log2(P)).
+    Lighter compute, vectorizes efficiently with AVX2.
+  - 64-bit hash (-DHASH64): full 64-bit multiply by Knuth's golden ratio
+    constant (0x9E3779B97F4A7C15), shifts right by (64 - log2(P)).
+    Better hash quality but requires emulated 64x64 multiply in AVX2.
+
+Three implementations per hash strategy:
+  1. partition_map_baseline : plain C++, auto-vectorization disabled
+  2. partition_map_autovec  : plain C++ (same source), auto-vectorization enabled
+  3. partition_map_avx2     : hand-written AVX2 intrinsics
+
+Build
+-----
+  make            # builds 32-bit hash binaries (baseline, autovec, avx2)
+  make all64      # builds 64-bit hash binaries (*_64 suffix)
+  make vec-report    # GCC vectorization reports for 32-bit hash
+  make vec-report-64 # GCC vectorization reports for 64-bit hash
+  make clean      # removes all binaries and report files
+
+Run
+---
+  # 32-bit hash (default)
+  ./partition_map_baseline N P [seed] [num_runs]
+  ./partition_map_autovec  N P [seed] [num_runs]
+  ./partition_map_avx2     N P [seed] [num_runs]
+
+  # 64-bit hash
+  ./partition_map_baseline_64 N P [seed] [num_runs]
+  ./partition_map_autovec_64  N P [seed] [num_runs]
+  ./partition_map_avx2_64     N P [seed] [num_runs]
+
+Arguments:
+  N        - number of keys (e.g. 100000000 for 100M)
+  P        - number of partitions, must be power of 2 (e.g. 256)
+  seed     - PRNG seed for reproducible key generation (default: 42)
+  num_runs - number of benchmark repetitions (default: 11)
+
+Example (on the spmcluster, node09):
+  srun -p gpu-shared -w node09 ./partition_map_baseline 100000000 256
+  srun -p gpu-shared -w node09 ./partition_map_autovec  100000000 256
+  srun -p gpu-shared -w node09 ./partition_map_avx2     100000000 256
+  srun -p gpu-shared -w node09 ./partition_map_baseline_64 100000000 256
+  srun -p gpu-shared -w node09 ./partition_map_autovec_64  100000000 256
+  srun -p gpu-shared -w node09 ./partition_map_avx2_64     100000000 256
+
+Correctness Verification
+------------------------
+Each run prints a position-sensitive XOR checksum. All three binaries
+of the same hash variant must produce the same checksum for the same
+(N, P, seed).
+
+The AVX2 binaries always verify their output against the scalar
+implementation before benchmarking.
+
+Vectorization Report
+--------------------
+Run 'make vec-report' or 'make vec-report-64' to generate:
+  vec_optimized_32.txt / vec_optimized_64.txt - vectorized loops
+  vec_missed_32.txt    / vec_missed_64.txt    - missed loops (with reasons)
+
+Design Choices
+--------------
+Hash function: multiply-shift hash using Knuth's golden ratio constant.
+  Two variants provided to compare vectorization effectiveness:
+  - 32-bit: single _mm256_mullo_epi32, processes 8 keys/iteration
+  - 64-bit: emulated via three _mm256_mul_epu32, processes 4 keys/iteration
+
+Key generation: splitmix64 PRNG (deterministic from seed).
+
+Project Structure
+-----------------
+  Modulo1_Titu/
+  ├── Makefile
+  ├── README
+  ├── src/
+  │   ├── partition_map.cpp       # plain C++ (baseline + autovec)
+  │   ├── partition_map_avx2.cpp  # AVX2 intrinsics version
+  │   ├── keygen.hpp              # deterministic key generation
+  │   ├── verify.hpp              # checksum + element-wise verification
+  │   └── hpc_helpers.hpp         # timing macros + benchmarking stats
+  └── report/                     # PDF report goes here

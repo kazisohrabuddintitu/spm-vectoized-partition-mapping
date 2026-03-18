@@ -1,0 +1,131 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2cm]{geometry}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{caption}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{blue},
+  commentstyle=\color{gray},
+  breaklines=true,
+  frame=single,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  xleftmargin=1.5em,
+}
+
+\title{\textbf{SPM Modular Project -- Module 1} \\ Partition Mapping Kernel}
+\author{Kazi Sohrab Uddin Titu \\ Student ID: 715980}
+\date{March 2026}
+
+\begin{document}
+\maketitle
+
+\section{Design Choices}
+
+\subsection{Hash Function}
+
+The partition mapping kernel assigns each 64-bit key to a partition ID in $[0, P)$ using a \textbf{multiply-shift hash}. This approach is branch-free and SIMD-friendly, requiring only a multiply and a right shift per key.
+
+Two hash variants are provided, selectable at compile time via \texttt{-DHASH64}:
+
+\begin{itemize}
+  \item \textbf{32-bit hash (default):} Extracts the upper 32 bits of each key, multiplies by Knuth's 32-bit golden ratio constant ($\texttt{0x9E3779B9}$), and shifts right by $32 - \log_2 P$.
+  \[
+    \text{part\_id}[i] = \left(\text{hi32}(\text{key}[i]) \times \texttt{0x9E3779B9}\right) \gg (32 - \log_2 P)
+  \]
+
+  \item \textbf{64-bit hash:} Full 64-bit multiply by $\texttt{0x9E3779B97F4A7C15}$, shifted right by $64 - \log_2 P$.
+  \[
+    \text{part\_id}[i] = \left(\text{key}[i] \times \texttt{0x9E3779B97F4A7C15}\right) \gg (64 - \log_2 P)
+  \]
+\end{itemize}
+
+The 32-bit variant was added because the kernel is \textbf{memory-bandwidth bound} (12 bytes per element: 8-byte key read + 4-byte partition ID write). The lighter 32-bit multiply allows vectorization to yield a measurable speedup, whereas the heavier 64-bit emulated multiply in AVX2 adds compute overhead that cannot outpace the memory bottleneck.
+
+\subsection{Key Generation and Verification}
+
+Keys are generated deterministically using the \textbf{splitmix64} PRNG, seeded once for reproducibility. Correctness is verified via: (1) a position-sensitive XOR checksum that all implementations must match for the same $(N, P, \text{seed})$, and (2) element-by-element comparison in the AVX2 binary against a scalar reference.
+
+\section{GCC Auto-Vectorization}
+
+Two binaries are compiled from the same source (\texttt{partition\_map.cpp}):
+\begin{itemize}
+  \item \texttt{partition\_map\_baseline}: compiled with \texttt{-O3 -fno-tree-vectorize}
+  \item \texttt{partition\_map\_autovec}: compiled with \texttt{-O3 -mavx2}
+\end{itemize}
+
+The GCC vectorization report (\texttt{-fopt-info-vec-optimized}) confirms that the hot loop is vectorized:
+
+\begin{lstlisting}[language={},title={vec\_optimized\_32.txt (excerpt)}]
+src/partition_map.cpp:50:26: optimized: loop vectorized
+                             using 32 byte vectors
+src/partition_map.cpp:50:26: optimized: loop vectorized
+                             using 16 byte vectors
+\end{lstlisting}
+
+\begin{lstlisting}[language={},title={vec\_optimized\_64.txt (excerpt)}]
+src/partition_map.cpp:36:26: optimized: loop vectorized
+                             using 32 byte vectors
+\end{lstlisting}
+
+Both hash variants' main loops are vectorized by GCC. However, as shown in Section~4, the 64-bit auto-vectorized version is actually \emph{slower} than its baseline because the emulated 64-bit multiply introduces more compute than the memory system can hide.
+
+\section{AVX2 Intrinsics Strategy}
+
+\subsection{32-bit Hash (8 keys/iteration)}
+
+The 32-bit AVX2 kernel processes \textbf{8 keys per iteration}:
+\begin{enumerate}
+  \item Load 8 keys via two 256-bit loads (\texttt{\_mm256\_loadu\_si256}).
+  \item Extract the upper 32 bits from each 64-bit lane using \texttt{\_mm256\_permutevar8x32\_epi32} with a shuffle mask selecting odd 32-bit elements.
+  \item Combine two groups of 4 upper halves into one 256-bit register via \texttt{\_mm256\_permute2x128\_si256}.
+  \item Multiply all 8 values by the 32-bit constant using \texttt{\_mm256\_mullo\_epi32}.
+  \item Shift right with \texttt{\_mm256\_srli\_epi32} and store 8 partition IDs.
+\end{enumerate}
+
+\subsection{64-bit Hash (4 keys/iteration)}
+
+The 64-bit AVX2 kernel processes \textbf{4 keys per iteration}, emulating 64$\times$64-bit multiply using three \texttt{\_mm256\_mul\_epu32} calls:
+\begin{enumerate}
+  \item Compute $\text{lo} \times \text{lo}$, $\text{hi} \times \text{lo}$, and $\text{lo} \times \text{hi}$ (32$\times$32$\to$64).
+  \item Combine cross products, shift left by 32, and add to get the lower 64 bits of the full product.
+  \item Variable shift with \texttt{\_mm256\_srlv\_epi64} and pack results to 32-bit using \texttt{\_mm256\_permutevar8x32\_epi32}.
+\end{enumerate}
+
+Both kernels include a scalar tail loop for the remaining elements when $N$ is not a multiple of the vector width.
+
+\section{Performance Results}
+
+All benchmarks were run on \textbf{node09} of the SPM cluster (AMD CPU, NVIDIA A30 GPU) using $N = 100{,}000{,}000$ keys, $P = 256$, 11 repetitions (median reported).
+
+\begin{table}[h]
+\centering
+\caption{Throughput comparison (Mkeys/s), $N=10^8$, $P=256$}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Implementation} & \textbf{Baseline} & \textbf{Autovec} & \textbf{AVX2} \\
+\midrule
+32-bit hash & 1144 & 1212 (+5.9\%) & \textbf{1271 (+11.1\%)} \\
+64-bit hash & 1115 & 975 ($-$12.6\%) & 1038 ($-$6.9\%) \\
+\bottomrule
+\end{tabular}
+\label{tab:results}
+\end{table}
+
+\subsection{Analysis}
+
+\paragraph{Memory-bandwidth bound.} Each element requires reading an 8-byte key and writing a 4-byte partition ID (12 bytes total). At $N = 10^8$ elements this is 1.2\,GB of data. The baseline already achieves $\sim$1144\,Mkeys/s $\approx$ 13.7\,GB/s, which is close to the single-core memory bandwidth of the node. This confirms the kernel is \textbf{memory-bandwidth bound}.
+
+\paragraph{32-bit hash: vectorization helps.} The 32-bit hash uses a single \texttt{mullo\_epi32} instruction per 8 keys. This is light enough that the compute reduction from SIMD allows slightly better overlap with memory accesses, yielding a consistent 6--11\% speedup. The AVX2 intrinsics version is marginally faster than GCC's auto-vectorization due to more efficient data extraction and packing.
+
+\paragraph{64-bit hash: vectorization hurts.} The 64-bit hash requires emulating 64$\times$64 multiply with three 32-bit multiplies plus additions and shifts. In the auto-vectorized case, GCC's code generation adds enough overhead that it \emph{slows down} the kernel by 12.6\%. Even the hand-tuned AVX2 version is 6.9\% slower than the scalar 64-bit baseline. The extra compute cannot be hidden because the kernel is already bottlenecked on memory bandwidth.
+
+\paragraph{Key insight.} For memory-bound kernels, vectorization is beneficial only when it reduces per-element compute cost sufficiently to improve instruction throughput without exceeding the memory bandwidth ceiling. The 32-bit hash achieves this; the 64-bit hash does not.
+
+\end{document}

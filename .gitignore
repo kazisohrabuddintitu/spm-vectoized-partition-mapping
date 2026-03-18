@@ -1,0 +1,21 @@
+# Compiled binaries
+partition_map_baseline
+partition_map_autovec
+partition_map_avx2
+partition_map_baseline_64
+partition_map_autovec_64
+partition_map_avx2_64
+
+# Vectorization report files
+*.txt
+
+# LaTeX temp files
+report/*.aux
+report/*.log
+report/*.out
+
+# macOS
+.DS_Store
+
+# Zip archives
+*.zip
