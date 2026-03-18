@@ -81,7 +81,7 @@ Key generation: splitmix64 PRNG (deterministic from seed).
 
 Project Structure
 -----------------
-  Modulo1_Titu/
+  Modulo1_KaziSohrabUddinTitu/
   ├── Makefile
   ├── README
   ├── src/
